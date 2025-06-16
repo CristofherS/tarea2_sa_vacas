@@ -1,0 +1,402 @@
+version: '3.8'
+
+services:
+  # -----------------------------------------------------
+  # 1. Infraestructura de Mensajería (Kafka y Zookeeper)
+  # -----------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.0.1
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - microservices-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.0.1
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
+    networks:
+      - microservices-net
+
+  # -----------------------------------------------------
+  # 2. API Gateway (ej. usando Nginx como proxy inverso simple)
+  #    En un entorno real, sería un servicio más robusto como Spring Cloud Gateway o Kong
+  # -----------------------------------------------------
+  api-gateway:
+    build:
+      context: ./api-gateway # Asume que hay un directorio 'api-gateway' con un Dockerfile
+      dockerfile: Dockerfile_Nginx # Un Dockerfile de Nginx configurado para proxy inverso
+    hostname: api-gateway
+    container_name: api-gateway
+    ports:
+      - "80:80"
+    depends_on:
+      - products-service
+      - orders-service
+      - payment-service
+      - user-service
+    networks:
+      - microservices-net
+    volumes:
+      - ./api-gateway/nginx.conf:/etc/nginx/nginx.conf:ro # Monta la configuración de Nginx
+
+  # -----------------------------------------------------
+  # 3. Microservicios y sus Bases de Datos
+  # -----------------------------------------------------
+
+  # Servicio de Productos
+  products-service:
+    build:
+      context: ./products-service # Ruta al directorio del servicio de productos
+      dockerfile: Dockerfile
+    hostname: products-service
+    container_name: products-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@products-db:5432/products_db"
+      KAFKA_BROKER: "kafka:9092" # Para publicar/suscribirse a eventos
+    depends_on:
+      - products-db
+      - kafka
+    networks:
+      - microservices-net
+
+  products-db:
+    image: postgres:13
+    hostname: products-db
+    container_name: products-db
+    environment:
+      POSTGRES_DB: products_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - products_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  # Servicio de Carrito y Pedidos
+  orders-service:
+    build:
+      context: ./orders-service # Ruta al directorio del servicio de pedidos
+      dockerfile: Dockerfile
+    hostname: orders-service
+    container_name: orders-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@orders-db:5432/orders_db"
+      KAFKA_BROKER: "kafka:9092"
+    depends_on:
+      - orders-db
+      - kafka
+      - products-service # Podría necesitar consultar productos
+    networks:
+      - microservices-net
+
+  orders-db:
+    image: postgres:13
+    hostname: orders-db
+    container_name: orders-db
+    environment:
+      POSTGRES_DB: orders_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - orders_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  # Servicio de Pagos
+  payment-service:
+    build:
+      context: ./payment-service
+      dockerfile: Dockerfile
+    hostname: payment-service
+    container_name: payment-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@payment-db:5432/payment_db"
+      KAFKA_BROKER: "kafka:9092"
+      PAYMENT_GATEWAY_API_URL: "http://paymentgateway.external.com/api" # URL de la pasarela externa
+    depends_on:
+      - payment-db
+      - kafka
+    networks:
+      - microservices-net
+
+  payment-db:
+    image: postgres:13
+    hostname: payment-db
+    container_name: payment-db
+    environment:
+      POSTGRES_DB: payment_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - payment_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  # Servicio de Devoluciones y Cambios
+  returns-service:
+    build:
+      context: ./returns-service
+      dockerfile: Dockerfile
+    hostname: returns-service
+    container_name: returns-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@returns-db:5432/returns_db"
+      KAFKA_BROKER: "kafka:9092"
+    depends_on:
+      - returns-db
+      - kafka
+      - payment-service # Para gestionar reembolsos
+      - orders-service # Para consultar detalles del pedido original
+    networks:
+      - microservices-net
+
+  returns-db:
+    image: postgres:13
+    hostname: returns-db
+    container_name: returns-db
+    environment:
+      POSTGRES_DB: returns_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - returns_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  # Servicio de Usuarios y Autenticación
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    hostname: user-service
+    container_name: user-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@user-db:5432/user_db"
+      KAFKA_BROKER: "kafka:9092"
+      JWT_SECRET: "your_jwt_secret_key" # Clave secreta para JWT
+    depends_on:
+      - user-db
+      - kafka
+    networks:
+      - microservices-net
+
+  user-db:
+    image: postgres:13
+    hostname: user-db
+    container_name: user-db
+    environment:
+      POSTGRES_DB: user_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - user_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  # Servicio de Revisiones y Calificaciones
+  reviews-service:
+    build:
+      context: ./reviews-service
+      dockerfile: Dockerfile
+    hostname: reviews-service
+    container_name: reviews-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@reviews-db:5432/reviews_db"
+      KAFKA_BROKER: "kafka:9092"
+    depends_on:
+      - reviews-db
+      - kafka
+      - products-service # Para asociar revisiones a productos
+      - user-service # Para asociar revisiones a usuarios
+    networks:
+      - microservices-net
+
+  reviews-db:
+    image: postgres:13
+    hostname: reviews-db
+    container_name: reviews-db
+    environment:
+      POSTGRES_DB: reviews_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - reviews_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  # Servicio de Ofertas y Promociones
+  offers-service:
+    build:
+      context: ./offers-service
+      dockerfile: Dockerfile
+    hostname: offers-service
+    container_name: offers-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@offers-db:5432/offers_db"
+      KAFKA_BROKER: "kafka:9092"
+    depends_on:
+      - offers-db
+      - kafka
+    networks:
+      - microservices-net
+
+  offers-db:
+    image: postgres:13
+    hostname: offers-db
+    container_name: offers-db
+    environment:
+      POSTGRES_DB: offers_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - offers_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  # Servicio de Inventario/Stock
+  inventory-service:
+    build:
+      context: ./inventory-service
+      dockerfile: Dockerfile
+    hostname: inventory-service
+    container_name: inventory-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@inventory-db:5432/inventory_db"
+      KAFKA_BROKER: "kafka:9092"
+      REDIS_HOST: "redis" # Para cache de stock rápido
+    depends_on:
+      - inventory-db
+      - kafka
+      - redis
+    networks:
+      - microservices-net
+
+  inventory-db:
+    image: postgres:13
+    hostname: inventory-db
+    container_name: inventory-db
+    environment:
+      POSTGRES_DB: inventory_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - inventory_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  redis:
+    image: redis:6.2-alpine
+    hostname: redis
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - microservices-net
+
+  # Servicio de Notificaciones
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    hostname: notification-service
+    container_name: notification-service
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      # Configuración para envío de emails/SMS
+      EMAIL_SERVICE_API_KEY: "your_email_api_key"
+    depends_on:
+      - kafka
+    networks:
+      - microservices-net
+
+  # Servicio de Reportes y Análisis
+  reports-service:
+    build:
+      context: ./reports-service
+      dockerfile: Dockerfile
+    hostname: reports-service
+    container_name: reports-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@reports-db:5432/reports_db"
+      KAFKA_BROKER: "kafka:9092"
+    depends_on:
+      - reports-db
+      - kafka
+    networks:
+      - microservices-net
+
+  reports-db:
+    image: postgres:13
+    hostname: reports-db
+    container_name: reports-db
+    environment:
+      POSTGRES_DB: reports_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - reports_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+  # Servicio de Atención al Cliente
+  customer-support-service:
+    build:
+      context: ./customer-support-service
+      dockerfile: Dockerfile
+    hostname: customer-support-service
+    container_name: customer-support-service
+    environment:
+      DATABASE_URL: "postgresql://user:password@customer-support-db:5432/customer_support_db"
+      KAFKA_BROKER: "kafka:9092"
+    depends_on:
+      - customer-support-db
+      - kafka
+    networks:
+      - microservices-net
+
+  customer-support-db:
+    image: postgres:13
+    hostname: customer-support-db
+    container_name: customer-support-db
+    environment:
+      POSTGRES_DB: customer_support_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - customer_support_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+
+# -----------------------------------------------------
+# Redes y Volúmenes
+# -----------------------------------------------------
+networks:
+  microservices-net:
+    driver: bridge # Red para que los servicios se comuniquen entre sí
+
+volumes:
+  products_data:
+  orders_data:
+  payment_data:
+  returns_data:
+  user_data:
+  reviews_data:
+  offers_data:
+  inventory_data:
+  reports_data:
+  customer_support_data:
